@@ -1,0 +1,1616 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ClientStatus {
+  LEAD
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+}
+
+enum ProjectStatus {
+  PLANNING
+  IN_PROGRESS
+  ON_HOLD
+  COMPLETED
+  CANCELLED
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  IN_REVIEW
+  DONE
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+// Invoice System Slice 1 (docs/invoicing-architecture.md §4.1/§5). NONE has
+// no discountValue; PERCENTAGE is 0-100; FIXED is a flat amount that must
+// never exceed the invoice's own subtotal — enforced by
+// calculateInvoiceTotals(), never by the database.
+enum InvoiceDiscountType {
+  NONE
+  PERCENTAGE
+  FIXED
+}
+
+// Invoice System Slice 1 (docs/invoicing-architecture.md §4.1). Which label
+// the PDF/UI prints next to the tax line — the calculation itself is
+// identical regardless of label (one exclusive tax rate, §5).
+enum InvoiceTaxLabel {
+  TAX
+  VAT
+  GST
+}
+
+// Invoice System Slice 1 (docs/invoicing-architecture.md §4.3/§9.1). States
+// reflect exactly what's knowable about a Resend send attempt: PENDING (no
+// provider result yet), ACCEPTED (provider returned 2xx — not proof of
+// delivery), FAILED (a definitive rejection before acceptance), UNKNOWN
+// (the outcome could not be established, e.g. a timeout — never silently
+// reclassified as FAILED). Unused in Slice 1 — no code sends email yet;
+// this enum exists so InvoiceEmailAttempt's shape doesn't need a second
+// migration once Slice 4 adds the send path.
+enum InvoiceEmailAttemptStatus {
+  PENDING
+  ACCEPTED
+  FAILED
+  UNKNOWN
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REVOKED
+  EXPIRED
+}
+
+// Billing & Subscriptions Stage 2 (docs/billing-architecture.md §2/§5). One
+// value today, on purpose — this app connects no provider at runtime in
+// this stage (no SDK, no API client, no webhook route). A real Prisma enum
+// rather than a free string so a second provider later is an additive enum
+// value (Postgres supports ALTER TYPE ... ADD VALUE without a destructive
+// migration), and so TypeScript can exhaustively check every place that
+// ever branches on provider, the same reasoning this schema already uses
+// for every other status-like enum.
+enum BillingProvider {
+  PADDLE
+}
+
+// Billing & Subscriptions Stage 2 (docs/billing-architecture.md §5/§13).
+// This app's own local access-tier vocabulary — deliberately not a 1:1
+// copy of every status a payment provider's API can report (PAUSED is
+// omitted: docs/billing-architecture.md §13 marks it provider-conditional
+// and nothing in this stage's v1 scope needs it yet; adding it later is a
+// pure additive enum value, not a breaking change). See
+// src/lib/billing/access-mode.ts for the full state -> access mapping.
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  UNPAID
+}
+
+// Billing & Subscriptions Stage 2 — the WebhookEvent processing lifecycle.
+// Nothing writes or reads this column yet (no webhook route exists in this
+// stage); the enum is fixed now so the ledger's shape never needs an
+// ALTER-in-place once Stage 4 actually adds a handler. IGNORED is for an
+// event type this app deliberately never acts on (still recorded for
+// idempotency/audit, never processed) — distinct from FAILED, which means
+// processing was attempted and did not succeed.
+enum WebhookProcessingStatus {
+  PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+  IGNORED
+}
+
+enum ActivityEntityType {
+  CLIENT
+  PROJECT
+  TASK
+  INVOICE
+  MEMBERSHIP
+  INVITATION
+  ATTACHMENT
+  PORTAL_USER
+  // Comments & Mentions Stage 1 (docs/comments-architecture.md §10): a
+  // Comment create/edit/delete records an Activity row exactly like every
+  // other entity, using the existing CREATED/UPDATED/DELETED ActivityAction
+  // values below — deliberately no COMMENT-specific action names, the same
+  // choice Client/Project/Invoice already made (only Task and Membership
+  // have genuinely distinct extra actions like STATUS_CHANGED/ROLE_CHANGED;
+  // a comment has no such transition to name). A mention is a consequence
+  // of a create/edit, never its own ActivityAction.
+  COMMENT
+}
+
+enum ActivityAction {
+  CREATED
+  UPDATED
+  STATUS_CHANGED
+  DELETED
+  INVITATION_SENT
+  INVITATION_RESENT
+  INVITATION_CANCELED
+  INVITATION_ACCEPTED
+  ROLE_CHANGED
+  OWNERSHIP_TRANSFERRED
+  MEMBER_REMOVED
+  MEMBER_LEFT
+  FILE_UPLOADED
+  FILE_DELETED
+  PORTAL_INVITATION_SENT
+  PORTAL_INVITATION_RESENT
+  PORTAL_INVITATION_CANCELED
+  PORTAL_INVITATION_ACCEPTED
+  PORTAL_USER_REMOVED
+}
+
+enum AttachmentEntityType {
+  CLIENT
+  PROJECT
+  INVOICE
+}
+
+// Scoped narrower than ActivityEntityType/AttachmentEntityType on purpose —
+// same precedent as Attachment's own enum not covering every entity type
+// Activity does. Comments & Mentions Stage 1 design doc (docs/comments-
+// architecture.md §2) supports exactly these two targets; a third target
+// is a new enum value in its own additive migration, never a reinterpreted
+// existing one.
+enum CommentEntityType {
+  PROJECT
+  TASK
+}
+
+// Deliberately NOT one-to-one with ActivityAction: only the subset of
+// events with a well-defined, non-empty recipient today produces a
+// notification (see docs/notifications-architecture.md §2's full
+// classification of every ActivityAction). Most Activity volume —
+// routine Client/Project/Task/Invoice CREATED/UPDATED, every Attachment
+// event, every non-accepted Invitation/Portal event — is intentionally
+// never notified; adding a type here should mean a new fan-out rule is
+// actually ready to ship, not "this action exists in ActivityAction so it
+// gets a Notification counterpart too."
+enum NotificationType {
+  ROLE_CHANGED
+  OWNERSHIP_TRANSFERRED
+  MEMBER_REMOVED
+  INVITATION_ACCEPTED
+  PORTAL_INVITATION_ACCEPTED
+  INVOICE_STATUS_CHANGED
+  // Comments & Mentions Stage 1 (docs/comments-architecture.md §5/§10):
+  // the only Comment-related event that ever notifies anyone — a bare
+  // comment (no @mention) never produces a Notification. Added now,
+  // schema-only, because Stage 3's fan-out rule needs this value to
+  // exist; no NotificationRule references it yet (see notification-
+  // rules.ts, untouched by this stage) and no Server Action creates one.
+  MENTIONED
+
+  // Billing & Subscriptions Stage 4 (docs/billing-architecture.md §17).
+  // Every one of these notifies the org's OWNER only, created directly by
+  // the webhook handler (src/lib/billing/notify.ts) rather than through
+  // dispatchNotificationsForActivity/createActivity — a webhook event has
+  // no human actor and no ActivityEntityType/ActivityAction fits a
+  // Subscription row, so these Notification rows are written with
+  // activityId/entityType/entityId all null, the same "system-triggered,
+  // no Activity behind it" shape this schema's own Notification.activityId
+  // comment already anticipated. TRIAL_ENDING is deferred to a future cron
+  // stage (needs a daily reminder job, not this stage's webhook path) and
+  // is deliberately not added here yet — adding it later is a pure
+  // additive enum value, not a breaking change.
+  SUBSCRIPTION_ACTIVATED
+  PAYMENT_FAILED
+  SUBSCRIPTION_CANCELED
+  PLAN_CHANGED
+}
+
+// Only channel implemented so far (Stage 6) — SMS/webhook/etc. are future
+// values on this same enum, never a reason to add another table.
+enum NotificationChannel {
+  EMAIL
+}
+
+// PENDING is never actually persisted by Stage 6's synchronous, request-
+// bound delivery helper (a row goes straight from "about to attempt" to
+// SENT/FAILED/SKIPPED within the same call) — kept in the enum anyway
+// because a future queue-backed sender needs exactly this state for "row
+// exists, not yet attempted," and adding it later would be a second
+// migration for a value that obviously belongs here from day one.
+// PROCESSING (Stage 8) is the claim state a background job atomically
+// transitions a row into before calling the provider — never a
+// caller-visible "final" state, always followed by SENT/FAILED/SKIPPED,
+// or reclaimed back out of PROCESSING if a worker died mid-attempt (see
+// lockedAt below).
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  SKIPPED
+}
+
+// Onboarding Stage 2 (docs/onboarding-architecture.md §9 Option C). Every
+// value this app's onboarding checklist can ever track — deliberately the
+// same fixed, small, closed set docs/onboarding-architecture.md §5 already
+// settled on, not a general-purpose "step" concept. Most of these
+// (CREATE_CLIENT, CREATE_PROJECT, CREATE_TASK, INVITE_TEAMMATE,
+// INVITE_PORTAL_USER) never actually produce an
+// OrganizationOnboardingStep row at all — their "done" state is always
+// computed live from real Client/Project/Task/Membership/PortalUser data
+// (src/lib/onboarding/progress.ts), never persisted here. Only WELCOME,
+// FINISH, and an explicitly-skipped step ever get a row (see that model's
+// own comment). REVIEW_BILLING exists in this enum today purely as an
+// inert, zero-risk placeholder — no code on this branch reads or writes
+// it, since `feature/billing-subscriptions` is not merged into `main` as
+// of this stage (see docs/onboarding-architecture.md §16); the seam is
+// ready, nothing depends on it yet.
+enum OnboardingStepKey {
+  WELCOME
+  // Customer Setup Wizard (Stage 6.2, docs/onboarding-architecture.md's
+  // own "growing the step-key set is designed to grow, §20" allowance —
+  // an additive enum value, same as every other step key here). These
+  // three sit between WELCOME and CREATE_CLIENT (src/lib/onboarding/
+  // steps.ts's own ONBOARDING_STEP_ORDER) — initial workspace setup,
+  // before a user starts putting business data in.
+  COMPANY_PROFILE
+  PAYMENT_DETAILS
+  DOMAIN_SETUP
+  CREATE_CLIENT
+  CREATE_PROJECT
+  CREATE_TASK
+  INVITE_TEAMMATE
+  INVITE_PORTAL_USER
+  REVIEW_BILLING
+  FINISH
+}
+
+// Customer Setup Wizard (Stage 6.2). Never real-time-verified — a fixed,
+// inert placeholder status exactly like REVIEW_BILLING was before Billing
+// existed (schema.prisma's own precedent for "an honest placeholder, not
+// a guessed future state"). No DNS/ownership verification of any kind
+// runs anywhere in this app; VERIFIED is defined for a future stage to
+// actually set, never written by any code on this branch.
+enum DomainVerificationStatus {
+  PENDING
+  VERIFIED
+}
+
+// id is intended to match Supabase auth.users.id once auth is wired up.
+model User {
+  id        String   @id @default(uuid()) @db.Uuid
+  email     String   @unique
+  name      String
+  avatarUrl String?
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ownedProjects Project[] @relation("ProjectOwner")
+  assignedTasks Task[]    @relation("TaskAssignee")
+  clients       Client[]  @relation("ClientOwner")
+
+  memberships             Membership[]
+  sentInvitations         Invitation[]             @relation("InvitationInvitedBy")
+  sentClientInvitations   ClientInvitation[]       @relation("ClientInvitationInvitedBy")
+  activities              Activity[]               @relation("ActivityActor")
+  uploadedAttachments     Attachment[]             @relation("AttachmentUploadedBy")
+  notifications           Notification[]           @relation("NotificationRecipient")
+  notificationPreferences NotificationPreference[]
+  authoredComments        Comment[]                @relation("CommentAuthor")
+  commentMentions         CommentMention[]         @relation("CommentMentionUser")
+
+  // Invoice System Slice 1 (docs/invoicing-architecture.md §4.3). Unused
+  // until Slice 4 adds a real send path — see InvoiceEmailAttempt.
+  requestedInvoiceEmailAttempts InvoiceEmailAttempt[] @relation("InvoiceEmailAttemptRequestedBy")
+}
+
+// Multi-tenant scaffolding (schema-only for now; not yet wired into app
+// logic). Business entities below carry a nullable organizationId so
+// existing single-user data keeps working unchanged.
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  memberships   Membership[]
+  invitations   Invitation[]
+  activities    Activity[]
+  notifications Notification[]
+
+  clients     Client[]
+  projects    Project[]
+  tasks       Task[]
+  invoices    Invoice[]
+  attachments Attachment[]
+  comments    Comment[]
+
+  // Invoice System Slice 3, sub-PR 3b — see InvoicePdfArchiveObject's own
+  // doc comment.
+  invoicePdfArchiveObjects InvoicePdfArchiveObject[]
+
+  // Portal Analytics persistence foundation (docs/analytics-architecture.md
+  // §12, Slice 1) — see PortalDownloadRequest's own doc comment.
+  portalDownloadRequests PortalDownloadRequest[]
+
+  // Billing & Subscriptions Stage 2. Optional on this side because an
+  // Organization created before this stage shipped has none — see
+  // Subscription's own doc comment for the full "legacy" fallback story.
+  subscription  Subscription?
+  webhookEvents WebhookEvent[]
+
+  onboardingSteps OrganizationOnboardingStep[]
+
+  // Customer Setup Wizard (Stage 6.2). All three optional on this side for
+  // the same reason `subscription` is: every Organization that exists
+  // before this stage ships has none yet — each row is only ever created
+  // once its own setup step's form is actually submitted (see each
+  // model's own doc comment).
+  profile        OrganizationProfile?
+  paymentDetails OrganizationPaymentDetails?
+  domainSettings OrganizationDomainSettings?
+}
+
+// Customer Setup Wizard (Stage 6.2) — Company Profile step. One row per
+// Organization, created only once the OWNER submits the form (no row =
+// "not set up yet", the same "no row = default/not-yet-acted" model
+// `NotificationPreference`/`OrganizationOnboardingStep` already use — see
+// those models' own comments). `Organization.name` already IS the
+// display/company name shown throughout the app (header, org switcher) —
+// this step edits that existing field directly rather than duplicating it
+// here; only the genuinely new facts (legal name, country, currency,
+// timezone) get new columns, per this stage's own "extend existing
+// models, don't duplicate" instruction. All four fields are required at
+// the database level because the row itself is only ever created by one
+// complete, server-validated form submission (updateCompanyProfileAction)
+// — never partially, the same "all-or-nothing" shape `Subscription`'s own
+// required fields already have.
+model OrganizationProfile {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @unique @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // The formal registered business name — distinct from Organization.name
+  // (the everyday display name), e.g. for future invoice/contract copy.
+  legalName String
+
+  // Freeform text, not an ISO-3166-validated enum/lookup — this stage
+  // does not implement a country database (out of scope, see this
+  // stage's own "do not redesign" constraint); validated only for
+  // required-ness/length in the Server Action, the same level of
+  // validation Client.company/Client.notes already get.
+  country String
+
+  // ISO 4217 currency code (e.g. "USD"), validated server-side against
+  // Intl.supportedValuesOf("currency") — a real platform API, not a
+  // hand-maintained list — never against a DB-level enum (mirrors
+  // Subscription.planKey's own "String, validated in code, never a
+  // Prisma enum" reasoning: this is descriptive catalog data, not a
+  // small fixed set core to this schema's own structure).
+  currency String
+
+  // IANA time zone name (e.g. "America/New_York"), validated server-side
+  // against Intl.supportedValuesOf("timeZone") — same reasoning as
+  // currency above.
+  timezone String
+
+  // Sale-Ready Phase A.1 (Business Identity) — all nine fields below are
+  // additive and nullable: an organization that has set none of them
+  // renders under the platform default (siteConfig / no logo) everywhere
+  // that reads them, never a broken state. None of them replace an
+  // existing field — `legalName` above already covers "legalEntityName",
+  // `country` above already covers itself, and `displayName` is (and
+  // stays) Organization.name, not a column here — see this stage's own
+  // architecture doc for why each of those three was excluded from this
+  // list rather than duplicated.
+
+  // Supabase Storage public URL — set by uploadOrganizationLogo() (PR4;
+  // PR1 was schema-only, see this stage's own PR-split plan). Stored in
+  // the dedicated, public "logos" bucket (src/lib/storage/logo-config.ts),
+  // never the private "attachments" bucket Attachment.storagePath uses —
+  // a logo must resolve to a real, permanent URL usable in <img src>
+  // anywhere, which a private bucket's short-lived signed URLs can't give.
+  logoUrl String?
+
+  // Hex color, e.g. "#0F172A" — validated server-side against
+  // /^#[0-9a-f]{6}$/i by whichever later PR adds the write path; this
+  // migration only reserves the column.
+  brandColor String?
+
+  // Validated server-side with the same EMAIL_PATTERN (auth)/signup.ts
+  // already uses, by the write-path PR that adds it — not this one.
+  supportEmail String?
+
+  // Validated as a well-formed, https-only URL by the write-path PR.
+  website String?
+
+  // Freeform — no per-country phone-format validation, the same
+  // "descriptive, not validated against a lookup" precedent `country`
+  // above and OrganizationPaymentDetails.accountNumber already use.
+  phone String?
+
+  // Freeform tax/VAT identifier — no jurisdiction-specific format
+  // validation, same reasoning as `phone` above.
+  taxId String?
+
+  // Postal address, split the conventional way — freeform per field, no
+  // structured/validated address lookup (out of scope, mirrors this
+  // model's own existing `country` field's own "no country database"
+  // decision). `country` above is reused for the address; not duplicated.
+  streetAddress String?
+  city          String?
+  state         String?
+  postalCode    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Customer Setup Wizard (Stage 6.2) — Payment Receiving Details step.
+// Deliberately its own table, never folded into OrganizationProfile or
+// Organization itself: this is the one genuinely sensitive concern this
+// stage adds (real bank details), and keeping it structurally isolated
+// means no query written for company-profile/domain data can ever
+// accidentally select these columns too — the same "sensitive concern
+// gets its own narrow table" reasoning `Subscription` already established
+// for billing data. OWNER-only read AND write, enforced in
+// src/lib/organization-setup/authorization.ts and re-checked at every
+// call site (service layer + Server Action), never left to the UI alone.
+// This is NOT a payment processor integration (no Stripe, no real payment
+// collection) — purely where an organization tells this app where to
+// send money it's owed, entered and read back as plain text.
+model OrganizationPaymentDetails {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @unique @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  bankName            String
+  accountHolder       String
+  // Account number or IBAN — one free-text field, since which format
+  // applies depends entirely on the organization's own country/bank, and
+  // this stage does not implement per-country account-number validation.
+  accountNumber       String
+  swiftBic            String
+  // Optional: not every organization needs extra free-text instructions
+  // beyond the four structured fields above.
+  paymentInstructions String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Customer Setup Wizard (Stage 6.2) — Domain Settings preparation step.
+// No DNS/domain verification of any kind happens anywhere in this app —
+// `verificationStatus` is a fixed, inert placeholder (see its own enum
+// comment above). The generated subdomain shown to a user in this step's
+// own UI is never stored here: it's always computed on the fly from this
+// Organization's own unique `slug` (already real, already unique) plus
+// this app's base domain — storing a second, derivable copy of the same
+// fact would be exactly the kind of redundant state this schema
+// consistently avoids elsewhere (e.g. onboarding's own computed-by-
+// default philosophy, docs/onboarding-architecture.md §9 Option A). A row
+// here only ever exists once the OWNER has visited this step at least
+// once (no row = "hasn't gotten to domain setup yet", not "has no
+// domain") — `customDomain` itself stays nullable even then, since
+// confirming "I'll use the generated subdomain" is itself a valid,
+// complete way to finish this step without ever entering a custom one.
+model OrganizationDomainSettings {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @unique @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Globally unique: two different tenants can never claim the same
+  // custom domain, the same cross-tenant uniqueness guarantee
+  // Attachment.storagePath/Invitation.token already give their own
+  // globally-unique values.
+  customDomain       String?                  @unique
+  verificationStatus DomainVerificationStatus @default(PENDING)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Membership {
+  id        String   @id @default(uuid()) @db.Uuid
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+}
+
+model Invitation {
+  id        String           @id @default(uuid()) @db.Uuid
+  email     String
+  role      Role             @default(MEMBER)
+  token     String           @unique
+  status    InvitationStatus @default(PENDING)
+  expiresAt DateTime
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  invitedById String? @db.Uuid
+  invitedBy   User?   @relation("InvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
+  @@index([email])
+}
+
+model Client {
+  id        String       @id @default(uuid()) @db.Uuid
+  name      String
+  email     String?
+  phone     String?
+  company   String?
+  status    ClientStatus @default(LEAD)
+  notes     String?
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+
+  userId String @db.Uuid
+  user   User   @relation("ClientOwner", fields: [userId], references: [id], onDelete: Restrict)
+
+  organizationId String?       @db.Uuid
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  projects Project[]
+  invoices Invoice[]
+
+  // Client Portal — a separate identity space from staff User/Membership
+  // (see PortalUser/ClientInvitation below), scoped to exactly this Client.
+  portalUsers       PortalUser[]
+  clientInvitations ClientInvitation[]
+
+  // Invoice System Slice 1 (docs/invoicing-architecture.md §4.4) — optional
+  // billing identity used by a future invoice PDF's "Bill To" block. All
+  // nullable, never backfilled (no source-of-truth data exists to backfill
+  // from) — every existing Client row has these null until a staff member
+  // fills them in via the Client form's Billing details subsection.
+  // billingLegalName exists only for the rarer case where a formal legal
+  // invoicing name differs from `company`/`name`; address field naming
+  // deliberately matches OrganizationProfile's own exact convention
+  // (streetAddress/city/state/postalCode).
+  billingLegalName String?
+  taxId            String?
+  streetAddress    String?
+  city             String?
+  state            String?
+  postalCode       String?
+  country          String?
+
+  @@unique([userId, email])
+  @@index([status])
+  @@index([userId])
+  @@index([organizationId])
+}
+
+model Project {
+  id          String        @id @default(uuid()) @db.Uuid
+  name        String
+  description String?
+  status      ProjectStatus @default(PLANNING)
+  startDate   DateTime?
+  endDate     DateTime?
+  budget      Decimal?      @db.Decimal(10, 2)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  clientId String @db.Uuid
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  ownerId String @db.Uuid
+  owner   User   @relation("ProjectOwner", fields: [ownerId], references: [id], onDelete: Restrict)
+
+  organizationId String?       @db.Uuid
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  tasks    Task[]
+  invoices Invoice[]
+
+  @@index([status])
+  @@index([ownerId])
+  @@index([organizationId])
+}
+
+model Task {
+  id          String       @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  status      TaskStatus   @default(TODO)
+  priority    TaskPriority @default(MEDIUM)
+  dueDate     DateTime?
+  completedAt DateTime?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  projectId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  assigneeId String? @db.Uuid
+  assignee   User?   @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+
+  organizationId String?       @db.Uuid
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([dueDate])
+  @@index([organizationId])
+}
+
+model Invoice {
+  id            String        @id @default(uuid()) @db.Uuid
+  invoiceNumber String
+  status        InvoiceStatus @default(DRAFT)
+  amount        Decimal       @db.Decimal(10, 2)
+  currency      String        @default("USD")
+  notes         String?
+  issueDate     DateTime      @default(now())
+  dueDate       DateTime?
+  paidAt        DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  clientId String @db.Uuid
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Restrict)
+
+  projectId String  @db.Uuid
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Restrict)
+
+  // Required, kept consistent with project.organizationId by every write
+  // path (never trusted from client input) — Restrict, not SetNull, since
+  // an Invoice's Project/Client can never be deleted out from under it
+  // either, and Organizations are never hard-deleted anywhere in this app.
+  // Migration 20260911090000_repair_invoice_organization_scope backfilled
+  // this column from Project.organizationId for every pre-existing row.
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  // Invoice System Slice 1 (docs/invoicing-architecture.md §4.1/§12).
+  // Transitional EXPAND schema, not §4's final contracted shape — see the
+  // schema-level comments below for exactly what's deferred to Slice 5.
+
+  // Staff-only — never rendered to the PDF, never emailed, never shown to
+  // any portal identity. Remains editable in every status, including after
+  // a future finalization concept exists (§3.3).
+  internalNotes String?
+
+  discountType   InvoiceDiscountType @default(NONE)
+  discountValue  Decimal?            @db.Decimal(10, 2)
+  taxRatePercent Decimal?            @db.Decimal(5, 2)
+  taxLabel       InvoiceTaxLabel     @default(TAX)
+
+  // Invoice System Official Slice 5b — the deferred contract-phase change
+  // (docs/invoicing-architecture.md §4.1/§12 step 4), applied by migration
+  // 20260915090000_add_invoice_totals_not_null_contract. Every real write
+  // path has supplied all three from calculateInvoiceTotals()'s own
+  // always-non-null Decimal result since Slice 1 shipped; that migration's
+  // own guard verifies this against real data before applying NOT NULL —
+  // it performs no backfill of its own. `amount` (existing column,
+  // unchanged meaning) remains the sole canonical total every
+  // Dashboard/Analytics/Search/Portal query reads.
+  subtotal       Decimal @default(0) @db.Decimal(10, 2)
+  discountAmount Decimal @default(0) @db.Decimal(10, 2)
+  taxAmount      Decimal @default(0) @db.Decimal(10, 2)
+
+  // Finalization/archival — schema reserved now, unwritten by any code
+  // path in Slice 1 (Slice 3 is the sole future writer, §8.1 step 5).
+  finalizedAt       DateTime?
+  issuerSnapshot    Json?
+  recipientSnapshot Json?
+
+  pdfStoragePath  String?   @unique
+  pdfGeneratedAt  DateTime?
+  documentVersion Int       @default(1)
+
+  lineItems     InvoiceLineItem[]
+  emailAttempts InvoiceEmailAttempt[]
+
+  // Invoice System Slice 3, sub-PR 3b — see InvoicePdfArchiveObject's own
+  // doc comment. The FK on the ledger side is SetNull, not Cascade
+  // (deleting this Invoice never deletes its archive-object history) —
+  // this reverse relation exists so a still-existing Invoice can look up
+  // its own archive attempts; no code path reads it in this sub-PR.
+  pdfArchiveObjects InvoicePdfArchiveObject[]
+
+  // Invoice System Official Slice 5c (docs/invoicing-architecture.md
+  // §4.5/§12.5) — Invoice-number uniqueness is organization-wide, not
+  // per-Client. Replaces the prior [clientId, invoiceNumber] tuple; see
+  // migration 20260916090000_invoice_number_unique_per_organization for
+  // the guarded expand/contract sequence and its own residual-risk note.
+  @@unique([organizationId, invoiceNumber])
+  @@index([status])
+  @@index([dueDate])
+  @@index([projectId])
+  @@index([organizationId])
+}
+
+// Invoice System Slice 1 (docs/invoicing-architecture.md §4.2). Schema
+// reserved now; no Server Action writes a row in Slice 1 — there is no
+// itemized UI yet (Slice 2). Positions are always server-assigned and
+// contiguous (0..n-1) by whatever slice's Server Action eventually saves
+// them — never trusted from client input.
+model InvoiceLineItem {
+  id        String  @id @default(uuid()) @db.Uuid
+  invoiceId String  @db.Uuid
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  description String
+  quantity    Decimal @db.Decimal(10, 3)
+  unitPrice   Decimal @db.Decimal(10, 2)
+  lineTotal   Decimal @db.Decimal(10, 2)
+  position    Int
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([invoiceId, position])
+}
+
+// Invoice System Slice 1 (docs/invoicing-architecture.md §4.3). Schema
+// reserved since Slice 1; no production code sends an email or creates a
+// row here yet — Slice 4 owns the real send path. requestedByUserId
+// follows the established actor/audit-FK convention (User? + onDelete:
+// SetNull, see Task.assigneeId/Activity.actorId/Attachment.uploadedById/
+// Comment.authorId).
+//
+// Invoice System Slice 4, PR 4a — the partial unique index enforcing "at
+// most one PENDING attempt per invoice" (§4.3/§9.2) now exists, added by
+// raw SQL in migration 20260914090000_add_invoice_email_attempt_pending_index:
+//   CREATE UNIQUE INDEX "invoice_email_attempt_one_pending"
+//     ON "InvoiceEmailAttempt" ("invoiceId")
+//     WHERE "status" = 'PENDING';
+// It remains intentionally unrepresentable in this Prisma schema DSL
+// (Prisma has no partial-index syntax in this project's own configuration
+// — the same reason NotificationDelivery's own would-be partial index was
+// deliberately replaced with a plain composite index instead, see that
+// model's own comment) — this comment is its only representation here.
+// Deliberately NOT `@@unique([invoiceId, status])`: that would forbid
+// every legitimate historical non-PENDING row for the same invoice
+// (multiple ACCEPTED/FAILED/UNKNOWN attempts across retries/resends are
+// all expected and allowed) — only a genuinely partial index scoped to
+// `status = 'PENDING'` expresses the actual invariant.
+model InvoiceEmailAttempt {
+  id        String  @id @default(uuid()) @db.Uuid
+  invoiceId String  @db.Uuid
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  recipientEmail String
+  status         InvoiceEmailAttemptStatus @default(PENDING)
+
+  idempotencyKey    String  @unique
+  providerMessageId String?
+  failureReason     String?
+
+  requestedByUserId String? @db.Uuid
+  requestedByUser   User?   @relation("InvoiceEmailAttemptRequestedBy", fields: [requestedByUserId], references: [id], onDelete: SetNull)
+
+  attemptedAt        DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+  providerAcceptedAt DateTime?
+
+  @@index([invoiceId, attemptedAt])
+  @@index([invoiceId, status, attemptedAt])
+}
+
+// Invoice System Slice 3, sub-PR 3b — durable archival-object ledger. Every
+// PDF Issue (and future Legacy Archive) attempt registers a row here BEFORE
+// ever uploading, and only ever transitions it forward
+// (PENDING_UPLOAD -> REFERENCED, or PENDING_UPLOAD -> CLEANUP_PENDING ->
+// CLEANED on a compensated failure) — this is what makes "was this Storage
+// object left behind by a failed/interrupted attempt" a bounded database
+// query for the future Slice 3d reconciliation worker, never a full bucket
+// listing. No PDF bytes, signed URL, or raw provider error is ever stored
+// here — see lastCleanupFailureCategory's own comment for its bounded
+// category contract.
+enum InvoicePdfArchiveObjectStatus {
+  PENDING_UPLOAD
+  REFERENCED
+  CLEANUP_PENDING
+  CLEANED
+}
+
+model InvoicePdfArchiveObject {
+  // Deliberately the same value as the archiveId embedded in storagePath —
+  // one identity for "this archive attempt", never two unrelated random
+  // ids that could drift out of sync with each other.
+  id String @id @db.Uuid
+
+  // Restrict, not Cascade: this ledger is the durable evidence trail for
+  // archived Invoice PDFs — deleting an Organization must never silently
+  // erase the only database record of an object that may still exist in
+  // private Storage. No code path in this application ever deletes an
+  // Organization row while archive-object rows for it still exist; this
+  // constraint exists to make that failure loud (a DB error) rather than
+  // a silent, unrecoverable data loss.
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+
+  // Nullable + SetNull: an Invoice DRAFT can be deleted (deleteInvoiceAction
+  // requires status DRAFT) concurrently with an in-flight Issue attempt —
+  // the ledger row must outlive that race so a stray uploaded object is
+  // still discoverable/cleanable even if its source Invoice no longer
+  // exists by the time reconciliation runs.
+  invoiceId String?  @db.Uuid
+  invoice   Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  // Matches the archived Invoice.documentVersion at issuance time —
+  // positive by application contract (never enforced at the DB level here,
+  // the same "descriptive, validated in code" precedent this schema
+  // already uses elsewhere, e.g. OrganizationProfile.currency).
+  documentVersion Int
+
+  // organizations/<organizationId>/invoice-pdf/<invoiceId>/v<documentVersion>/<archiveId>.pdf
+  // in the existing private "attachments" bucket (src/lib/invoices/pdf/storage.ts)
+  // — unique because Storage's own create-only (upsert: false) semantics
+  // make a collision here always a bug, never an intended overwrite.
+  storagePath String @unique
+
+  status InvoicePdfArchiveObjectStatus @default(PENDING_UPLOAD)
+
+  // Stamped with the Issue operation's own single injected/current
+  // timestamp, in the same short transaction that flips status to
+  // REFERENCED — never a separately-read `now()`.
+  referencedAt DateTime?
+  // Stamped when a compensating removal is confirmed to have succeeded.
+  cleanedAt    DateTime?
+
+  // Claim-related fields — read/written only by the future Slice 3d
+  // reconciliation worker (not implemented in this PR); this Issue
+  // pipeline never sets cleanupLockedAt/cleanupClaimToken itself, only
+  // cleanupAttemptCount/lastCleanupFailureCategory on its own
+  // best-effort compensating-removal attempt.
+  cleanupLockedAt   DateTime?
+  cleanupClaimToken String?   @db.Uuid
+
+  cleanupAttemptCount Int @default(0)
+
+  // A bounded, predefined category only — never a raw third-party error
+  // message, response body, signed URL, or object path. Exactly one of:
+  // "storage_not_configured", "probe_failed", "remove_failed",
+  // "invariant_violation", "invoice_reference_detected" (written by
+  // src/lib/invoices/pdf/reconcile-archive-objects.ts's own closed
+  // ReconciliationFailureCategory union), or "remove_failed"/
+  // "storage_not_configured" (written by
+  // src/lib/invoices/pdf/archive-compensation.ts, a strict subset of the
+  // same set).
+  lastCleanupFailureCategory String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([invoiceId])
+  @@index([status, createdAt])
+  @@index([status, cleanupLockedAt])
+}
+
+// Append-only audit log. Never updated or deleted by app code (see
+// createActivity(), added in a later stage). entityId is deliberately not a
+// foreign key: Client/Project/Task/Invoice rows can be deleted while their
+// Activity history must remain readable — metadata carries a snapshot of
+// the entity (and, since actorId can go null, of the actor) taken at write
+// time, so this row never depends on either still existing.
+model Activity {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Nullable: no action deletes a User today, but Membership.userId -> User
+  // is already onDelete: Cascade elsewhere in this schema, so if that ever
+  // changes, the actor's own history shouldn't vanish or block the delete.
+  actorId String? @db.Uuid
+  actor   User?   @relation("ActivityActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  entityType ActivityEntityType
+  entityId   String             @db.Uuid
+  action     ActivityAction
+
+  // Snapshot + diff data only (e.g. { field, from, to } or a deleted
+  // entity's display name) — never full form payloads, tokens, or secrets.
+  metadata Json @default("{}")
+
+  createdAt DateTime @default(now())
+
+  notifications Notification[]
+
+  // General organization timeline: ORDER BY createdAt DESC, id DESC.
+  @@index([organizationId, createdAt, id])
+  // Entity-specific timeline (a later stage) — scoped by org first so a
+  // foreign entityId can never be queried across tenants.
+  @@index([organizationId, entityType, entityId, createdAt, id])
+}
+
+// In-app notification inbox — see docs/notifications-architecture.md for
+// the full design and the classification of exactly which ActivityAction
+// values produce one (§2) and why every field below is shaped the way it
+// is (§3). Nothing outside this migration wires a fan-out yet: no Server
+// Action writes to this table, and createActivity() is untouched — this
+// stage is schema-only, on purpose (see the design doc's §9 migration
+// strategy: schema first, fan-out hook second, UI last).
+//
+// Deliberately User-only for this stage: a PortalUser's notification
+// inbox is a structurally separate concept (same reasoning as PortalUser
+// itself never being mixed with User elsewhere in this schema), and no
+// MVP notification type targets a portal contact — recipientId is
+// required and points at User alone. Portal delivery later means a new
+// nullable FK (or a fully separate table) added in its own additive
+// migration, never repurposing this column to mean two different
+// identity types.
+model Notification {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  recipientId String @db.Uuid
+  recipient   User   @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  // The Activity row this notification was generated from, when there is
+  // one. Nullable + SetNull, same reasoning as Activity.actorId: a future
+  // scheduled job (a due-date check — see the design doc's §7) writes a
+  // Notification with no Activity row behind it at all, since nothing
+  // "happened" in the Activity sense — entityType/entityId below (not
+  // activityId) is what such a notification uses to say what it's about.
+  activityId String?   @db.Uuid
+  activity   Activity? @relation(fields: [activityId], references: [id], onDelete: SetNull)
+
+  type NotificationType
+
+  // Deliberately not a foreign key — identical reasoning to Activity's
+  // own entityId and Attachment's own entityId: the referenced Client/
+  // Project/Task/Invoice/Membership/etc. row can be deleted later without
+  // orphaning or blocking this read history. Nullable because not every
+  // notification type needs to name one specific entity.
+  entityType ActivityEntityType?
+  entityId   String?             @db.Uuid
+
+  // Structured snapshot data only — the same allowlisted-field discipline
+  // as Activity.metadata (an entity name, a changed-field list, a
+  // {from, to} pair, an actor name) — never a pre-rendered display
+  // string, a token, a signed URL, or any other secret. Display text is
+  // computed at read time from `type` + this metadata by a future
+  // formatter mirroring formatActivity() exactly, not stored pre-rendered
+  // here — kept consistent with how Activity itself already works,
+  // rather than introducing a second, subtly different rendering
+  // philosophy for a sibling table.
+  metadata Json @default("{}")
+
+  // The only mutable column in this table at this stage — every other
+  // field is written once at create and never updated again, the same
+  // append-only discipline Activity already follows.
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  deliveries NotificationDelivery[]
+
+  // Unread count (WHERE recipientId = ? AND readAt IS NULL) and the
+  // default "my notifications" list (WHERE recipientId = ? ORDER BY
+  // createdAt DESC, id DESC) are both served by this one composite index
+  // — readAt sits before createdAt/id since the unread-first view is the
+  // hot path, and the full list still scans an efficient recipientId-
+  // bounded range even without the readAt predicate at this app's
+  // expected data volume (see the design doc's §8). Deliberately a plain
+  // composite index, not a Postgres partial index on `readAt IS NULL`:
+  // partial indexes aren't expressed by this Prisma version without a
+  // preview feature this project doesn't otherwise need, and at the
+  // small-org, 90-day-read-retention scale this product targets, the
+  // extra narrowing isn't worth that cost — revisit only if real volume
+  // ever says otherwise.
+  @@index([recipientId, readAt, createdAt, id])
+  // Org-scoped admin/debug listing — a future "what has this org been
+  // notified about" view, organizationId first the same way every other
+  // org-scoped table in this schema already indexes.
+  @@index([organizationId, recipientId, createdAt, id])
+  // Serves the activityId SetNull lookup and any future join from an
+  // Activity row to the notifications it produced.
+  @@index([activityId])
+}
+
+// Per-channel delivery attempt tracking for a Notification — Stage 6 adds
+// only EMAIL, but the shape is channel-generic from day one. Deliberately
+// its own table rather than columns on Notification itself: Notification
+// is the in-app read model (append-only except `readAt`), or delivery
+// state is a completely separate, per-channel, mutable-on-retry concern —
+// mixing them would mean every future channel adds more columns to the
+// one table every read-model query already scans.
+//
+// Never stores: the raw provider response, the API key, the rendered
+// email body, a token, a signed URL, a stack trace, or the recipient's
+// email address (that's already on User — this table only ever points at
+// notificationId, never duplicates PII). `failureCode` is a short,
+// stable, non-identifying label (e.g. "not_configured", "provider_error",
+// "network_error") — never a message string that could embed any of the
+// above.
+model NotificationDelivery {
+  id String @id @default(uuid()) @db.Uuid
+
+  notificationId String       @db.Uuid
+  notification   Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  channel NotificationChannel
+  status  NotificationDeliveryStatus @default(PENDING)
+
+  attemptedAt  DateTime?
+  deliveredAt  DateTime?
+  failureCode  String?
+  // Stage 6's delivery helper only ever attempts once per call (no
+  // in-process retry loop — see deliver-notification-email.ts) — this
+  // still counts every attempt across calls, since nothing here prevents
+  // a future retry job from calling the same helper again for a FAILED row.
+  attemptCount Int       @default(0)
+
+  // Stage 8: when to retry next, for a FAILED row within the retry
+  // ceiling — null means "no retry scheduled" (either never failed, or the
+  // ceiling was already reached). The retry job's own claim query is what
+  // makes this meaningful; nothing reads it before Stage 8.
+  nextAttemptAt DateTime?
+  // Stage 8: stamped the instant a background job claims this row (moves
+  // it to PROCESSING) — doubles as (a) the claim token two concurrent job
+  // runs race on, via a conditional updateMany matching the row's still-
+  // FAILED/PENDING status, and (b) the staleness clock: a PROCESSING row
+  // whose lockedAt is older than the job's own stale-lock threshold means
+  // whatever worker claimed it died before finishing, and it's safe to
+  // reclaim. Never read/written outside src/lib/notifications/jobs/.
+  lockedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // The one row per (Notification, channel) invariant — this is what makes
+  // "already SENT → no-op" and "no duplicate email for the same
+  // Notification" a database guarantee, not just application discipline.
+  @@unique([notificationId, channel])
+  // The retry job's own candidate-discovery query shape: "every eligible
+  // PENDING/FAILED/stale-PROCESSING row, oldest first" — unused by the
+  // Stage 6/7 request-bound path, which never queries by status.
+  @@index([status, createdAt])
+}
+
+// Per-user, per-type opt-out for the two channels shipped so far (in-app,
+// email — a future push channel adds its own `pushEnabled` column here,
+// not a new table, since it's still "one row per user per type"). No JSON:
+// every channel is its own typed, non-nullable, defaulted boolean column,
+// so a query can filter on it directly instead of unpacking a blob.
+//
+// Rows are created lazily — only when a user actually changes a toggle
+// away from the built-in default (see src/lib/notifications/preferences.ts).
+// No row for a given (user, type) means "both channels enabled", the same
+// default the columns themselves declare; this is why nothing needs to be
+// backfilled here or provisioned at signup. "Reset to defaults" deletes
+// the row entirely rather than writing true/true back, so a user with
+// untouched preferences and a user who explicitly reset both look
+// identical in this table — one row, one meaning.
+model NotificationPreference {
+  id String @id @default(uuid()) @db.Uuid
+
+  userId String @db.Uuid
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  type NotificationType
+
+  inAppEnabled Boolean @default(true)
+  emailEnabled Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, type])
+}
+
+// File attachments for Client/Project/Invoice, stored in Supabase Storage.
+// entityId is deliberately not a foreign key, same reasoning as Activity —
+// this stays a single simple association that extends to Task later with
+// just an enum value, no new migration for a new column. Unlike Activity,
+// an Attachment is a live resource tied to its parent, not a historical
+// record: deleting the parent entity must explicitly delete both this row
+// and its Storage object as part of that same operation (added when the
+// entity delete flows are wired up) — there's no onDelete Cascade here to
+// do that automatically, since entityId has no FK to cascade from.
+model Attachment {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Nullable, same reasoning as Activity.actorId: no action deletes a User
+  // today, but if one ever does, the file shouldn't vanish or block the
+  // delete just because this is who uploaded it.
+  uploadedById String? @db.Uuid
+  uploadedBy   User?   @relation("AttachmentUploadedBy", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  entityType AttachmentEntityType
+  entityId   String               @db.Uuid
+
+  storageBucket String
+  // The actual Supabase Storage object key — unique because it's built
+  // server-side from a fresh attachmentId, never from user input alone.
+  storagePath   String @unique
+  originalName  String
+  mimeType      String
+  sizeBytes     Int
+
+  createdAt DateTime @default(now())
+
+  // General "attachments for this org" and entity-specific listings both
+  // read newest-first — id included for the same stable-tiebreak reason
+  // as Activity's indexes, even though this stage doesn't add pagination.
+  @@index([organizationId, entityType, entityId, createdAt, id])
+  @@index([organizationId, createdAt, id])
+}
+
+// Comments & Mentions Stage 1 design (docs/comments-architecture.md §2).
+// Schema only in this stage — no Server Action writes to this table yet,
+// createActivity()/dispatch-notifications.ts are untouched, and no parser
+// exists (see that doc's own §10 staged rollout: schema first, fan-out
+// hook second, UI last — the same order Notification itself shipped in).
+//
+// entityId is deliberately not a foreign key, same reasoning as Activity
+// and Attachment: a Project or Task can be deleted without this row
+// needing to participate in that cascade chain via its own FK (Comment's
+// cascade is via organizationId instead — see below). PROJECT/TASK
+// ownership of a given entityId (i.e. "does this Project actually belong
+// to this organizationId") is an application-layer check, not a schema
+// guarantee — the same division of responsibility Activity/Attachment
+// already have.
+model Comment {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  // Nullable + SetNull, identical reasoning to Activity.actorId/
+  // Attachment.uploadedById: no action deletes a User today, but a
+  // comment shouldn't vanish (or block the delete) just because of who
+  // wrote it — it stays in the thread as an authorless historical row.
+  authorId String? @db.Uuid
+  author   User?   @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  entityType CommentEntityType
+  entityId   String            @db.Uuid
+
+  // Plain text only — never Markdown, never an HTML/AST blob. A comment
+  // may contain zero or more embedded mention tokens as literal text
+  // (parsed by a future Stage 3 parser, not this schema); rendering never
+  // trusts the raw body as markup (docs/comments-architecture.md §8).
+  body String
+
+  // Non-null = has been edited at least once; the UI shows "(edited)"
+  // next to this timestamp. No revision/version table — see the design
+  // doc's explicit rejection of that as over-engineering for what this
+  // product needs.
+  editedAt DateTime?
+
+  // Soft delete: the row is never removed and body is never cleared at
+  // the schema level (nullable timestamp only) — whether/how to blank the
+  // body and render a placeholder is an application-layer decision for a
+  // later stage, not something this schema enforces or assumes.
+  deletedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  mentions CommentMention[]
+
+  // Primary read path: "comments for this Project/Task, oldest or newest
+  // first" — org first, so a foreign entityId can never be queried across
+  // tenants, same shape as Activity/Attachment's own entity-specific index.
+  @@index([organizationId, entityType, entityId, createdAt, id])
+  // Author history / moderation view ("every comment this person wrote").
+  // No separate organization-wide "all comments" index — no named query
+  // needs one yet, and this stage doesn't add indexes speculatively.
+  @@index([authorId, createdAt])
+}
+
+// The @mention join row for a Comment — deliberately its own table, not a
+// column on Comment or a value embedded only in body text (docs/comments-
+// architecture.md §3): "who was mentioned" needs to be a real, queryable,
+// duplicate-proof fact, independent of whatever text-parsing produced it.
+// Stores only the two ids and when — no display name, no raw mention
+// token, no Notification id, no email, no organizationId (all fully
+// derivable via comment.organizationId and not needed by either index
+// below).
+model CommentMention {
+  id String @id @default(uuid()) @db.Uuid
+
+  commentId String  @db.Uuid
+  comment   Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+
+  // Cascade, not SetNull: unlike a comment's author, a mention with no
+  // resolvable user is meaningless — it exists only to answer "who was
+  // mentioned," and a deleted user is no longer an active notification
+  // recipient. This does NOT fire on Membership removal (a user leaving
+  // the org, User row intact) — only on the User row itself being
+  // deleted, which no action in this app does today. If a historical
+  // mention ever needs to survive real User deletion, that requires a
+  // nullable userId plus a captured display-name snapshot, which the
+  // design doc does not call for and this migration does not add.
+  userId String @db.Uuid
+  user   User   @relation("CommentMentionUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+
+  // The duplicate-mention guarantee as a database constraint, not just a
+  // future parser's own dedup logic — belt and suspenders, the same
+  // relationship NotificationDelivery's own @@unique has with its caller's
+  // pre-check. Its leading column (commentId) already serves "all mentions
+  // for this comment" efficiently via the standard leftmost-prefix rule,
+  // so no separate single-column @@index([commentId]) is needed.
+  @@unique([commentId, userId])
+  // "Comments that mention me" — not built this stage, but real enough
+  // (named explicitly in the design doc's §7) to index for now.
+  @@index([userId, createdAt])
+}
+
+// A Client Portal login — deliberately a separate identity from the staff
+// User model, not a Role/flag bolted onto it. A PortalUser never has a
+// Membership and is never resolved by getCurrentUserOrganization(); it
+// belongs to exactly one Client, never an Organization directly (the
+// organization is always reached by joining through that Client). This
+// keeps the two trust boundaries (internal staff vs. external client)
+// structurally incapable of being confused by a query written for the
+// other one.
+//
+// id has no @default: it must equal the Supabase auth.users.id of the
+// person who accepted a ClientInvitation, mirroring how User.id already
+// works — the row is created by application code once, not by the
+// database.
+//
+// email is intentionally not @unique: a person may be invited as a portal
+// contact for more than one Client (e.g. the same accountant handling two
+// separate client companies), and each such PortalUser is its own row with
+// its own id — global email uniqueness would prevent that legitimate case.
+// A single PortalUser row, however, always belongs to exactly one Client,
+// since clientId is a plain required scalar field, not a join table.
+model PortalUser {
+  id String @id @db.Uuid
+
+  clientId String @db.Uuid
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  email String
+  name  String
+
+  // Portal Analytics persistence foundation (docs/analytics-architecture.md
+  // §12, Slice 1). Current-state only: the timestamp of this identity's
+  // most recent explicit authentication (a real signInWithPassword success
+  // via /portal/login, or the moment a genuine PENDING -> ACCEPTED
+  // invitation acceptance first establishes it as an active portal
+  // session) — overwritten on every such event, never appended to. This is
+  // deliberately NOT a login history/event log: it cannot honestly support
+  // a previous-period comparison (a later login destroys the only evidence
+  // of an earlier one), so it is only ever read as "is this within the
+  // currently selected range," never diffed against a prior period. Never
+  // written by session-cookie resolution (getCurrentPortalUser()/
+  // getOptionalPortalUser() stay pure reads), a password-reset session, or
+  // a bare signup with no invitation accepted yet. Null = no tracked
+  // sign-in yet (including every PortalUser row that predates this
+  // column).
+  lastLoginAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([clientId])
+  @@index([email])
+  @@index([lastLoginAt])
+}
+
+// Portal Analytics persistence foundation (docs/analytics-architecture.md
+// §12, Slice 1) — the second of the two approved, minimal, privacy-
+// preserving additions this stage makes. One immutable row per
+// successfully issued portal attachment signed download link (see
+// src/app/api/portal/attachments/[id]/download/route.ts) — never per
+// download attempt that failed authorization, never per completed byte
+// transfer (this app has no way to observe that; a row means "an
+// authorized request received a signed link," nothing more).
+//
+// Deliberately organization-scoped ONLY — no portalUserId, no
+// attachmentId, no clientId, no email/name, no signed URL, no
+// storagePath/storageBucket, no IP, no User-Agent, no session/auth data,
+// no payload/metadata JSON of any kind. This table is structurally
+// incapable of answering "who downloaded what" — that is the point, not
+// an oversight (see check-analytics-security.mjs's own #13 for the
+// CI-enforced guarantee this shape never grows undetected).
+//
+// requestedAt is a real, precise timestamp (not a calendar-day bucket) so
+// this table can honestly answer this app's actual rolling-window
+// TimeRange queries (today/last7Days/last30Days/last90Days/allTime — see
+// src/lib/analytics/calculations/date-ranges.ts's own "rolling, not
+// calendar-aligned" doc comment) without the boundary-misalignment a
+// UTC-calendar-day aggregate would introduce.
+//
+// No unique constraint: every authorized signed-link issuance is its own
+// separate, immutable event — including legitimate repeat clicks on the
+// same document by the same identity, which this table has no way to (and
+// deliberately does not try to) distinguish from genuinely separate
+// download intents.
+model PortalDownloadRequest {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  requestedAt DateTime @default(now())
+
+  @@index([organizationId, requestedAt])
+}
+
+// Invitation for a Client Portal contact, deliberately separate from the
+// existing staff Invitation model rather than a nullable clientId bolted
+// onto it — that model is tied to Role (OWNER/ADMIN/MEMBER, meaningless
+// here) and its accept flow creates a Membership, not a PortalUser.
+// Keeping them apart means neither model's code has to branch on which
+// kind of invitation it's handling.
+model ClientInvitation {
+  id String @id @default(uuid()) @db.Uuid
+
+  clientId String @db.Uuid
+  client   Client @relation(fields: [clientId], references: [id], onDelete: Cascade)
+
+  email     String
+  token     String           @unique
+  status    InvitationStatus @default(PENDING)
+  expiresAt DateTime
+
+  invitedById String? @db.Uuid
+  invitedBy   User?   @relation("ClientInvitationInvitedBy", fields: [invitedById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([clientId, email])
+  @@index([clientId])
+  @@index([email])
+}
+
+// Billing & Subscriptions Stage 2 (docs/billing-architecture.md §5, refined
+// by this stage's own exact field list). One row per Organization — the
+// local, provider-independent record of what that org is entitled to.
+// Never the source of truth for money; once a provider is actually
+// connected (Stage 3+) that provider is, and this table only ever mirrors
+// it. This table IS the source of truth for feature access, and is safe
+// to read on every request with no network call — see
+// src/lib/billing/entitlements.ts.
+//
+// Created automatically and atomically alongside a brand-new Organization
+// (src/lib/billing/provisioning.ts, wired into getOrCreateOrganizationId
+// in src/lib/current-user.ts) — every Organization created from this
+// stage onward gets exactly one Subscription row, starting TRIALING.
+// Organizations that predate this stage have none at all by design: no
+// destructive backfill runs automatically as part of this migration (see
+// the migration's own header comment and prisma/backfill-subscriptions.ts,
+// which is optional and not run against any shared database in this
+// stage) — getOrganizationEntitlements() treats a missing row as "legacy,
+// full access" (src/lib/billing/access-mode.ts), never as an error, so
+// merging this stage can never degrade an existing organization's access.
+//
+// No BillingCustomer model: evaluated per docs/billing-architecture.md §5
+// and this stage's own instructions, and rejected — a provider customer id
+// has no independent lifecycle from this row (one Subscription per
+// Organization already, via the unique constraint below), so a separate
+// table would only add a join with no real benefit at this schema's
+// current shape. providerCustomerId/providerSubscriptionId live directly
+// here instead.
+model Subscription {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @unique @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  provider BillingProvider @default(PADDLE)
+
+  // Both nullable: unset for a TRIAL row (or any LEGACY-backfilled row)
+  // that has never gone through a real checkout with a real provider.
+  providerCustomerId     String? @unique
+  providerSubscriptionId String? @unique
+
+  // A stable, code-defined key (src/lib/billing/plans.ts) — never the
+  // provider's own price/product id. Deliberately a String, not a Prisma
+  // enum: adding a plan, renaming a display name, or changing a limit must
+  // never require a migration (docs/billing-architecture.md §6). Validated
+  // against the catalog in application code (isPlanKey()), not by the
+  // database.
+  planKey String
+
+  status SubscriptionStatus @default(TRIALING)
+
+  // Always set together, at row-creation time (see provisioning.ts) — a
+  // Subscription row is never created without knowing when its trial (if
+  // any) started/ends, even for a LEGACY-backfilled row (see
+  // prisma/backfill-subscriptions.ts, which backdates both to the backfill
+  // moment since a LEGACY row's ACTIVE status never consults them — see
+  // src/lib/billing/access-mode.ts).
+  trialStartedAt DateTime
+  trialEndsAt    DateTime
+
+  // Nullable: unset until a real billing period exists (i.e. until a real
+  // provider subscription has actually started — Stage 3+).
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+
+  cancelAtPeriodEnd Boolean   @default(false)
+  canceledAt        DateTime?
+
+  // Computed and stored, not recomputed ad hoc, the moment status enters
+  // PAST_DUE — see src/lib/billing/access-mode.ts's own grace-period logic.
+  gracePeriodEndsAt DateTime?
+
+  // Set by whatever last wrote real provider data to this row (a future
+  // webhook handler, Stage 4+) — null for a Stage-2-only TRIAL/LEGACY row
+  // no webhook has ever touched. Not read by anything in this stage;
+  // exists now so webhooks don't need a second migration just to add it.
+  providerUpdatedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// Billing & Subscriptions Stage 2 — schema foundation only. No route, no
+// processing logic exists yet, and nothing writes to this table in this
+// stage (Stage 4 adds the actual webhook Route Handler) — the same
+// "schema first, handler second" staged rollout this codebase's own
+// Notification model already used (docs/notifications-architecture.md §9).
+//
+// Deliberately never stores the raw webhook payload (docs/billing-
+// architecture.md §5's own "what this schema must never store") — Stage 1
+// proposed an allowlisted payloadSummary column for debugging; Stage 2
+// omits even that until a real handler exists to decide what's actually
+// worth summarizing, rather than guessing a shape now a later stage would
+// likely have to change anyway.
+model WebhookEvent {
+  id String @id @default(uuid()) @db.Uuid
+
+  provider BillingProvider
+
+  // The actual idempotency key — a duplicate delivery's insert attempt
+  // hits this constraint, the same "one row, checked before mutating"
+  // discipline NotificationDelivery's own
+  // @@unique([notificationId, channel]) already models in this schema.
+  providerEventId String @unique
+  eventType       String
+
+  // The provider's own "when this happened" timestamp — distinct from
+  // createdAt (when this app first saw it) so a future handler can detect
+  // out-of-order delivery (an event whose eventCreatedAt is older than the
+  // Subscription row's own last-applied change is a no-op, never a
+  // regression).
+  eventCreatedAt DateTime
+
+  // Nullable + SetNull, same reasoning as Activity.actorId: this row is a
+  // historical/audit record that must survive independently of the org it
+  // was about, should an org ever become deletable in the future (no
+  // action deletes an Organization anywhere in this app today).
+  organizationId String?       @db.Uuid
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  processedAt      DateTime?
+  processingStatus WebhookProcessingStatus @default(PENDING)
+  failureCode      String?
+  attempts         Int                     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // A future retry/reconciliation job's own candidate-discovery query
+  // shape ("every eligible PENDING/FAILED row, oldest first") — the same
+  // shape NotificationDelivery's own @@index([status, createdAt]) already
+  // serves for an analogous purpose. Unused by anything in this stage.
+  @@index([processingStatus, createdAt])
+  @@index([organizationId])
+}
+
+// Onboarding Stage 2 (docs/onboarding-architecture.md §9, Decision:
+// "Hybrid — computed by default... plus one small, additive table... for
+// the two things computation structurally cannot represent: an explicit
+// skip, and an explicit dismiss."). One row = "a member of this
+// organization explicitly skipped this step, or explicitly acknowledged a
+// step with no business-data equivalent (WELCOME, FINISH)." No row = still
+// following the natural, computed default — mirrors
+// NotificationPreference's own lazy-row/no-row-means-default model
+// exactly, right down to never needing a backfill: a brand-new
+// organization simply has zero rows here on day one, the same way a
+// brand-new user has zero NotificationPreference rows.
+//
+// "Dismiss the whole checklist" is deliberately NOT a separate column —
+// it's represented by the exact same mechanism as every other
+// acknowledgment: a row with step = FINISH. Modeling it as a second,
+// parallel flag (e.g. an `Organization.onboardingDismissedAt` column)
+// would say the same fact two different ways; this table's own
+// `@@unique([organizationId, step])` already guarantees at most one
+// FINISH row per organization, which is exactly the "one dismiss fact,
+// organization-scoped" property a separate column would otherwise exist
+// only to re-assert.
+//
+// Deliberately no `actedById`/User relation (a deviation from Stage 1's
+// own illustrative snippet, which included one purely as an optional
+// "who acted" audit field described there as "informational only, never
+// part of the authorization boundary"): this stage's own explicit
+// requirement is additive-minimal, no User FK, and nothing in the design
+// doc's actual feature set (§1–§20) ever reads who skipped/dismissed a
+// step — only whether the organization did. Adding it back later, if a
+// real need shows up, is a compatible, additive nullable column.
+//
+// Deliberately no `skippedAt`/`dismissedAt`/`status` columns: row
+// existence alone is the entire signal needed (mirrors Mention's own
+// "exists = mentioned, full stop" shape, docs/comments-architecture.md
+// §2) — `createdAt` already answers "when," and every step key that can
+// ever produce a row here (§6 of the design doc: only skippable steps,
+// plus WELCOME/FINISH) only ever means one thing when a row exists, so a
+// separate status column would only ever hold one possible value.
+// Deliberately no `updatedAt` either — rows here are write-once and never
+// updated in place (an "un-skip" is never a row UPDATE; it's the computed
+// check in src/lib/onboarding/progress.ts simply taking priority over a
+// now-stale row — see that module's own header comment), the same
+// immutable-row shape `Activity` already uses.
+model OrganizationOnboardingStep {
+  id String @id @default(uuid()) @db.Uuid
+
+  organizationId String       @db.Uuid
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  step OnboardingStepKey
+
+  createdAt DateTime @default(now())
+
+  // The actual idempotency/dedup guarantee — at most one row per
+  // (organization, step) ever exists, so re-skipping an already-skipped
+  // step, or re-acknowledging WELCOME/FINISH, is a database-enforced
+  // no-op path (an upsert with an empty `update`), never a duplicate row.
+  @@unique([organizationId, step])
+  // Onboarding is always read as "every row for this one organization" —
+  // never queried any other way (no cross-org listing, no per-step
+  // reporting across organizations exists in this design).
+  @@index([organizationId])
+}

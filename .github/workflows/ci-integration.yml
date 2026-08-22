@@ -1,0 +1,81 @@
+name: CI Integration & E2E
+
+# Runs test/integration/** (real Prisma against an in-process PGlite
+# Postgres) and test/e2e/** (real Chromium against a real `next start`
+# build). See docs/testing.md for the full architecture, the TEST_MODE
+# identity/Storage bypass this relies on, and why it can't affect a real
+# deployment (also verified by ci-fast.yml's security:check step).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Deliberately independent from ci-fast.yml (no `needs:`) — both run in
+    # parallel so a PR gets both signals sooner, at the cost of sometimes
+    # running this heavier job for a PR ci-fast.yml was always going to
+    # fail anyway. Revisit if that cost becomes a real problem: `needs:`
+    # requires both jobs in one workflow file; `workflow_run` avoids that
+    # but only runs the version of *this* file committed on the default
+    # branch — its own footgun for a PR that just edited it, like this one.
+    env:
+      # Placeholder values for `next build` only — it needs *a* value for
+      # the NEXT_PUBLIC_ vars to inline at build time; nothing in this job
+      # ever talks to a real Supabase project (see the TEST_MODE note above).
+      NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321"
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: "placeholder-anon-key"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Starts and migrates its own PGlite instance via Vitest's globalSetup
+      # — no separate "start the database" step needed.
+      - name: Integration tests (Vitest + real Prisma, PGlite-backed)
+        run: npm run test:integration
+
+      # Playwright's globalSetup starts a SEPARATE PGlite instance + fixture
+      # server for the E2E run below, independent of the suite above.
+      - name: Build the app (production build, required by webServer)
+        run: npm run build
+
+      - name: Install Playwright browsers (Chromium only)
+        run: npx playwright install --with-deps chromium
+
+      # playwright.config.ts's webServer spawns and tears down `next start`
+      # itself — no separate "start the app" step needed.
+      - name: Playwright E2E (real `next start` build, TEST_MODE identity)
+        run: npm run test:e2e
+
+      # Defensive safety net alongside Playwright's own globalTeardown, which
+      # already stops both in every normal pass/fail case — guards against
+      # an abrupt runner kill. 3100 must match playwright.config.ts's PORT.
+      - name: Ensure no lingering E2E processes (always runs)
+        if: always()
+        run: |
+          pkill -f "next start -p 3100" || true
+          pkill -f "tsx test/e2e/db-server.ts" || true
+
+      - name: Upload Playwright/Vitest artifacts (on failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: integration-e2e-failure-artifacts
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7

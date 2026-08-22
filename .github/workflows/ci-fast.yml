@@ -1,0 +1,66 @@
+name: CI Fast Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-fast-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fast-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Placeholder values — none of these steps touch a real database or
+      # Supabase project. `prisma validate` only checks schema syntax, and
+      # `next build` only needs *a* value for the NEXT_PUBLIC_ vars since
+      # Next.js inlines them at build time.
+      DATABASE_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+      DIRECT_URL: "postgresql://postgres:postgres@localhost:5432/postgres"
+      NEXT_PUBLIC_SUPABASE_URL: "http://127.0.0.1:54321"
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: "placeholder-anon-key"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: prisma validate
+        run: npx prisma validate
+
+      # Must run before TypeScript: next-env.d.ts imports
+      # .next/types/routes.d.ts (typed Route Handler params, e.g.
+      # RouteContext<...>), which next build generates. tsc --noEmit fails
+      # with "Cannot find name 'RouteContext'" on a fresh checkout otherwise.
+      - name: Build
+        run: npm run build
+
+      - name: TypeScript
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Static security checks
+        run: npm run security:check
+
+      - name: Unit tests with coverage
+        run: npm run test:unit:coverage
+
+      # lcov is only useful for debugging a failing coverage threshold —
+      # keep it, but only on failure, and only briefly.
+      - name: Upload coverage report (on failure only)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-coverage-report
+          path: coverage/
+          retention-days: 7
